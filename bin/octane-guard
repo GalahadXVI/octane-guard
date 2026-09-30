@@ -1,0 +1,137 @@
+#!/usr/bin/env php
+<?php
+
+declare(strict_types=1);
+
+/**
+ * Standalone Octane launch guard. Keep its durable state outside deployments.
+ *
+ * Pre-deployment candidate: qualify on isolated Linux with the installed Swoole
+ * and Supervisor versions before changing the production Forge entry.
+ */
+
+if ($argc === 2 && $argv[1] === '--help') {
+    echo <<<'HELP'
+Octane guard — standalone PHP, no Laravel bootstrap
+
+Usage:
+  php8.4 vendor/bin/octane-guard --run --app-dir=/absolute/site --state-dir=/absolute/private-state
+  php8.4 vendor/bin/octane-guard --reset --app-dir=/absolute/site --state-dir=/absolute/private-state
+
+PRE-DEPLOYMENT CANDIDATE: Linux/Swoole qualification is still required.
+
+How it works:
+  Supervisor runs this guard directly, as user forge, with one process.
+  The guard starts foreground Swoole on 127.0.0.1:8000 using this PHP binary.
+  It never calls supervisorctl, restarts Supervisor, or searches for port owners.
+  When stopped or its Octane child exits, it sends TERM to its own group,
+  waits 10 seconds, then KILLs the entire group including itself. A normal
+  stop therefore takes 10 seconds and may be logged as SIGKILL by Supervisor.
+  Any replacement refuses to start until the previous group has disappeared.
+
+Required settings on ONLY the Octane Supervisor program:
+  numprocs=1
+  autorestart=unexpected
+  exitcodes=0,78,255
+  startsecs=1
+  startretries=3
+  stopwaitsecs=20
+  stopsignal=TERM
+  stopasgroup=true
+  killasgroup=true
+
+Do not use Forge's default autorestart=true: it defeats the stopped circuit.
+Forge may rewrite manually edited settings. Check these after panel edits.
+No shared systemd/Supervisor or Horizon settings need changing.
+
+Setup and limits:
+  Use one pre-created, local, private directory owned by forge (mode 0700),
+  outside the application/release tree. Never delete/rotate it during deploys.
+  Keep --app-dir a stable absolute site path, including with release symlinks.
+  Use the same state directory for every start of this site's Octane guard.
+  First start initializes history. Missing/corrupt history later refuses to run.
+  Three unexpected terminations exhaust the persistent budget, even if months
+  apart. Failed starts and a killed guard consume it too. There is no
+  automatic hourly, deployment, or reboot reset. Clean requested stops refund
+  their own reservation. After fixing the cause, stop the Forge process, then
+  run --reset as forge and start it again. Reset refuses while a guard/group lives.
+  Exit 78 means a safety refusal; PHP startup/fatal exit 255 is also terminal.
+
+Supported scope:
+  Foreground Swoole only. Do not enable daemonize, watch mode, a custom Swoole
+  command, or application subprocesses that detach from the process group.
+  Verify the actual Linux process tree retains the guard's PGID before rollout.
+  This handles process exits/shutdowns; it does not detect hung HTTP workers.
+  It cannot safely adopt or kill old Octane processes from before installation.
+  Killing just the guard can leave children; the replacement deliberately
+  refuses to launch in that case rather than guessing which old PIDs to kill.
+  A forced request termination does not roll back completed external effects.
+
+Deploy the code first, qualify in isolation, then switch only the Octane entry.
+Do not start the old direct Octane entry alongside the guarded one.
+HELP;
+    echo PHP_EOL;
+    exit(0);
+}
+
+try {
+    if (PHP_SAPI !== 'cli' || PHP_OS_FAMILY !== 'Linux' || !extension_loaded('pcntl') || !extension_loaded('posix')) {
+        fwrite(STDERR, "[octane-guard] REFUSED: Linux CLI PHP with pcntl and posix is required.\n");
+        exit(78);
+    }
+
+    $arguments = array_slice($argv, 1);
+    $operation = array_shift($arguments);
+    $options = [];
+
+    foreach ($arguments as $argument) {
+        if (!preg_match('/^--(app-dir|state-dir)=(.+)$/D', $argument, $matches) || isset($options[$matches[1]]))
+            throw new RuntimeException('Invalid arguments.');
+
+        $options[$matches[1]] = $matches[2];
+    }
+
+    if (!in_array($operation, ['--run', '--reset'], true) || count($options) !== 2)
+        throw new RuntimeException('Invalid arguments.');
+
+    require_once __DIR__.'/../src/state.php';
+    require_once __DIR__.'/../src/guard.php';
+
+    $boot_id = trim((string) file_get_contents('/proc/sys/kernel/random/boot_id'));
+    $state = new GalahadXVI\OctaneGuard\State($options['state-dir'], $options['app-dir'], $boot_id);
+
+    if ($operation === '--reset') {
+        $state->acquire();
+        $record = $state->read();
+
+        if ($record['pgid'] !== null && !GalahadXVI\OctaneGuard\Guard::groupIsAbsent($record['pgid'])) {
+            fwrite(STDERR, "[octane-guard] REFUSED: previous group still exists or cannot be inspected. No reset or cleanup performed.\n");
+            exit(78);
+        }
+
+        $record['launches'] = 0;
+        $state->save($record);
+        fwrite(STDOUT, "[octane-guard] Launch budget reset. Start the existing Forge Octane process when ready.\n");
+        exit(0);
+    }
+
+    if (getenv('SUPERVISOR_ENABLED') !== '1' || !extension_loaded('swoole') || !is_file($options['app-dir'].'/artisan')) {
+        fwrite(STDERR, "[octane-guard] REFUSED: start directly through Supervisor with Swoole enabled and a valid application directory.\n");
+        exit(78);
+    }
+
+    $guard = new GalahadXVI\OctaneGuard\Guard($state, [
+        PHP_BINARY,
+        $options['app-dir'].'/artisan',
+        'octane:start',
+        '--server=swoole',
+        '--host=127.0.0.1',
+        '--port=8000',
+        '--no-interaction',
+    ], $options['app-dir']);
+
+    exit($guard->run());
+} catch (Throwable) {
+    fwrite(STDERR, "[octane-guard] REFUSED: invalid arguments or unsafe/unavailable state. See --help; no new Octane process started.\n");
+    exit(78);
+}

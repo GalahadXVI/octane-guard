@@ -1,0 +1,40 @@
+name: Tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  process-tests:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: shivammathur/setup-php@b604ade2a87db23f8871b7182e69ec5e75effb45 # v2
+        with:
+          php-version: '8.4'
+          extensions: pcntl, posix
+          coverage: none
+          tools: composer:v2
+      - name: Validate and install
+        run: |
+          composer validate --strict
+          composer install --no-interaction --prefer-dist --no-progress
+      - name: Prepare isolated Supervisor
+        run: |
+          python3 -m venv "$RUNNER_TEMP/octane-supervisor"
+          "$RUNNER_TEMP/octane-supervisor/bin/pip" install supervisor==4.2.5 setuptools==80.9.0
+          "$RUNNER_TEMP/octane-supervisor/bin/python" -c 'import os, supervisor; print("OCTANE_GUARD_SUPERVISOR_SOURCE=" + os.path.dirname(os.path.dirname(supervisor.__file__)))' >> "$GITHUB_ENV"
+          echo "OCTANE_GUARD_SUPERVISOR_PYTHON=$RUNNER_TEMP/octane-supervisor/bin/python" >> "$GITHUB_ENV"
+      - name: Test isolated process lifecycle and Supervisor restart bounds
+        run: ./vendor/bin/pest
+      - name: Check standalone command
+        run: php bin/octane-guard --help
