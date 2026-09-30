@@ -70,7 +70,7 @@ it('prints standalone command help without creating runtime state', function ():
 it('refuses invalid command arguments before creating history', function (string $case): void {
     $arguments = match ($case) {
         'missing-operation' => $this->cli_arguments,
-        'missing-path' => ['--reset', $this->cli_arguments[1]],
+        'empty-path' => ['--reset', '--app-dir='],
         'duplicate-path' => ['--reset', ...$this->cli_arguments, $this->cli_arguments[1]],
         'unknown-option' => ['--reset', ...$this->cli_arguments, '--force'],
         'conflicting-operations' => ['--reset', '--run', ...$this->cli_arguments],
@@ -81,9 +81,9 @@ it('refuses invalid command arguments before creating history', function (string
         ->and($result['output'])->toContain('REFUSED')
         ->and($result['output'])->not->toContain('Linux CLI PHP')
         ->and(iterator_count(new FilesystemIterator($this->cli_state)))->toBe(0);
-})->with(['missing-operation', 'missing-path', 'duplicate-path', 'unknown-option', 'conflicting-operations']);
+})->with(['missing-operation', 'empty-path', 'duplicate-path', 'unknown-option', 'conflicting-operations']);
 
-it('resets only the stopped budget without loading the application', function (): void {
+it('resets only the stopped budget without loading the application', function (bool $implicit_application): void {
     if (PHP_OS_FAMILY !== 'Linux')
         $this->markTestSkipped('The public reset command requires Linux boot identity.');
 
@@ -97,14 +97,25 @@ it('resets only the stopped budget without loading the application', function ()
     $record['launches'] = Guard::MAX_LAUNCHES;
     $state->save($record);
     $state->closeInChild();
-    $result = runOctaneGuardCommand(['--reset', ...$this->cli_arguments], $this->cli_directory.'/command');
+    $original_directory = getcwd();
+
+    try {
+        if ($implicit_application)
+            chdir($this->cli_app);
+
+        $arguments = $implicit_application ? ['--state-dir='.$this->cli_state] : $this->cli_arguments;
+        $result = runOctaneGuardCommand(['--reset', ...$arguments], $this->cli_directory.'/command');
+    } finally {
+        chdir($original_directory);
+    }
+
     $state->acquire();
 
     expect($result['exit_code'])->toBe(0)
         ->and($state->read())->toBe(array_replace($record, ['launches' => 0]));
 
     $state->closeInChild();
-});
+})->with(['explicit app path' => false, 'working directory' => true]);
 
 it('refuses to reset an occupied guard lock without changing its budget', function (): void {
     if (PHP_OS_FAMILY !== 'Linux')

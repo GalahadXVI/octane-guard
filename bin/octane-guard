@@ -3,6 +3,7 @@
 
 declare(strict_types=1);
 
+use GalahadXVI\OctaneGuard\ApplicationPath;
 use GalahadXVI\OctaneGuard\Blocked;
 use GalahadXVI\OctaneGuard\Guard;
 use GalahadXVI\OctaneGuard\GuardException;
@@ -13,22 +14,24 @@ if ($argc === 2 && $argv[1] === '--help') {
 Octane Guard (alpha)
 
 Forge background-process command:
-  /usr/bin/php8.4 /absolute/site/vendor/bin/octane-guard --run --app-dir=/absolute/site
+  /usr/bin/php8.4 /absolute/site/vendor/bin/octane-guard --run
 
 Use the site's user and working directory. Set Processes=1, Start=1 second,
 Stop=20 seconds, Stop Signal=SIGTERM. Keep Forge's automatic restart enabled.
 Replace the existing Octane command; do not run a second Octane entry.
 
 The guard automatically creates private state under the operating-system user's
-home: .octane-guard/<hash-of-app-path>. Keep the same --app-dir across deployments.
+home: .octane-guard/<hash-of-app-path>. The app defaults to the working directory.
+Optional --app-dir=/absolute/site overrides it. Use a stable absolute command path
+through the site symlink for release deployments, or pass a stable --app-dir.
 Optional --state-dir=/absolute/state preserves an existing installation's location.
 Never delete or change state to bypass a blocked guard.
 
 If blocked, the guard stays alive without retrying or launching Octane. The Forge
 process can appear running while Octane is down. See its log for the reason and
-five-minute reminders. Stop, fix the cause, then reset the count if exhausted:
-  php8.4 /absolute/site/vendor/bin/octane-guard --reset --app-dir=/absolute/site
-Use the same --state-dir for reset if you supplied one when running.
+five-minute reminders. Stop, fix the cause, then reset from the same app directory:
+  php8.4 /absolute/site/vendor/bin/octane-guard --reset
+Use the same --app-dir and --state-dir overrides for reset if supplied when running.
 
 Requirements: Linux CLI PHP with pcntl, posix, and Swoole. Foreground Swoole only.
 Octane starts at 127.0.0.1:8000 using the same PHP executable.
@@ -43,6 +46,7 @@ HELP;
 
 require_once __DIR__.'/../src/guard-exception.php';
 require_once __DIR__.'/../src/blocked.php';
+require_once __DIR__.'/../src/application-path.php';
 
 $operation = $argv[1] ?? null;
 $supervised_run = getenv('SUPERVISOR_ENABLED') === '1' && $operation !== '--reset';
@@ -62,16 +66,13 @@ try {
         $options[$matches[1]] = $matches[2];
     }
 
-    if (!isset($options['app-dir']))
-        throw new GuardException('--app-dir=/absolute/site is required.');
+    $options['app-dir'] = ApplicationPath::resolve($options['app-dir'] ?? null, $argv[0]);
 
     if (PHP_SAPI !== 'cli' || PHP_OS_FAMILY !== 'Linux' || !extension_loaded('pcntl') || !extension_loaded('posix'))
         throw new GuardException('Linux CLI PHP with pcntl and posix is required.');
 
     require_once __DIR__.'/../src/state.php';
     require_once __DIR__.'/../src/guard.php';
-
-    $options['app-dir'] = rtrim($options['app-dir'], '/');
 
     if (!isset($options['state-dir']))
         $options['state-dir'] = State::defaultDirectory($options['app-dir']);

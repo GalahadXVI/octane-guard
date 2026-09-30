@@ -35,7 +35,7 @@ From your application's root directory:
 
 ```bash
 composer config repositories.octane-guard vcs https://github.com/GalahadXVI/octane-guard.git
-composer require galahadxvi/octane-guard:0.1.0-alpha.3
+composer require galahadxvi/octane-guard:0.1.0-alpha.4
 ```
 
 Deploy the Composer changes normally. Installation puts the executable at `vendor/bin/octane-guard`; it does not start anything or change your server configuration. The repository is public, so normal downloads need no GitHub token.
@@ -56,7 +56,7 @@ Replace `/home/forge/example.com` with your site's stable path:
 | Forge field | Value |
 | --- | --- |
 | Name | `Octane Guard` |
-| Command | `/usr/bin/php8.4 /home/forge/example.com/vendor/bin/octane-guard --run --app-dir=/home/forge/example.com` |
+| Command | `/usr/bin/php8.4 /home/forge/example.com/vendor/bin/octane-guard --run` |
 | Working Directory | `/home/forge/example.com` |
 | User | `forge`, or the site's existing isolated user |
 | Processes | `1` |
@@ -66,7 +66,9 @@ Replace `/home/forge/example.com` with your site's stable path:
 
 Use your actual PHP executable. The guard uses it to start Octane too. Keep Forge's automatic restart enabled. **No manual Supervisor file edits, separate installer command, or shared service changes are needed for this setup.**
 
-The guard creates its private state directory automatically under the operating-system user's home: `~/.octane-guard/<hash-of-app-path>`. It stores the lock and failure count there, outside deployments. Keep the same `--app-dir` path, including when deployments use release symlinks.
+The guard creates its private state directory automatically under the operating-system user's home: `~/.octane-guard/<hash-of-app-path>`. It stores the lock and failure count there, outside deployments. `--app-dir` is optional: the guard uses Forge's **Working Directory**, which must contain `artisan`. To override it, append `--app-dir=/absolute/site`.
+
+For release-based deployments, use the absolute command path through your stable site symlink, as shown above. The guard preserves that path when it resolves to the working directory, keeping the same state across releases. Do not point the command at a numbered release folder. For a custom installation outside the application, supply a stable `--app-dir` explicitly when deployments change directories.
 
 **Forge showing “running” means the guard is alive, not that Octane is healthy.** If the guard blocks recovery, the explanation appears in that process's log. [Forge background processes and logs](https://laravel.com/forge/docs/resources/background-processes)
 
@@ -98,12 +100,13 @@ Read the reason in the Forge background-process log, then:
 3. If the failure count is exhausted, run the following as the same operating-system user that runs the guard:
 
 ```bash
-php8.4 /home/forge/example.com/vendor/bin/octane-guard --reset --app-dir=/home/forge/example.com
+cd /home/forge/example.com
+php8.4 /home/forge/example.com/vendor/bin/octane-guard --reset
 ```
 
 4. Start the background process again and check its log and the site.
 
-If you supplied `--state-dir` in Forge, include the same argument when resetting. Reset refuses while the guard holds the lock or its recorded process group still exists. Simply restarting a blocked process does not clear its failure count.
+If you supplied `--app-dir` or `--state-dir` in Forge, include the same overrides when resetting. Reset refuses while the guard holds the lock or its recorded process group still exists. Simply restarting a blocked process does not clear its failure count.
 
 ## Limits
 
