@@ -29,7 +29,7 @@ final class State
         $directory = rtrim($directory, '/');
         $application_path = rtrim($application_path, '/');
 
-        if (!$this->isNormalizedAbsolutePath($directory) || !$this->isNormalizedAbsolutePath($application_path))
+        if (!self::isNormalizedAbsolutePath($directory) || !self::isNormalizedAbsolutePath($application_path))
             throw new GuardException('Guard paths must be normalized absolute paths.');
 
         if (!$this->isBootId($boot_id))
@@ -50,6 +50,71 @@ final class State
         $this->directory = $directory;
         $this->application_path = $application_path;
         $this->boot_id = $boot_id;
+    }
+
+    /**
+     * Derive one stable storage path from the user account, not inherited HOME.
+     */
+    public static function defaultDirectory(string $application_path): string
+    {
+        $application_path = rtrim($application_path, '/');
+
+        if (!self::isNormalizedAbsolutePath($application_path))
+            throw new GuardException('Guard application path must be a normalized absolute path.');
+
+        $account = posix_getpwuid(posix_geteuid());
+        $home_directory = $account === false ? false : realpath($account['dir']);
+
+        if ($home_directory === false || $home_directory === '/' || !is_dir($home_directory))
+            throw new GuardException('Cannot resolve the operating-system user home. Supply --state-dir explicitly.');
+
+        return $home_directory.'/.octane-guard/'.hash('sha256', $application_path);
+    }
+
+    /**
+     * Create private storage without changing permissions or existing history.
+     */
+    public static function provisionDirectory(string $directory, string $application_path): void
+    {
+        $directory = rtrim($directory, '/');
+        $application_path = rtrim($application_path, '/');
+
+        if (!self::isNormalizedAbsolutePath($directory) || !self::isNormalizedAbsolutePath($application_path))
+            throw new GuardException('Guard paths must be normalized absolute paths.');
+
+        $resolved_application = realpath($application_path);
+
+        if ($resolved_application === false || !is_dir($application_path))
+            throw new GuardException('Guard application directory must exist.');
+
+        if ($directory === $resolved_application || str_starts_with($directory, $resolved_application.'/') || $directory === $application_path || str_starts_with($directory, $application_path.'/'))
+            throw new GuardException('Guard storage must be outside the deployed application.');
+
+        $path = '';
+
+        foreach (explode('/', ltrim($directory, '/')) as $component) {
+            $path .= '/'.$component;
+            clearstatcache(true, $path);
+            $path_stat = file_exists($path) || is_link($path) ? @lstat($path) : false;
+
+            if ($path_stat === false) {
+                @mkdir($path, 0700);
+                clearstatcache(true, $path);
+                $path_stat = @lstat($path);
+            }
+
+            if ($path_stat === false || ($path_stat['mode'] & 0170000) !== 0040000)
+                throw new GuardException('Guard storage path must contain only real directories.');
+
+            $trusted_owner = $path_stat['uid'] === 0 || $path_stat['uid'] === posix_geteuid();
+            $protected_temporary_parent = $path !== $directory && $path_stat['uid'] === 0 && ($path_stat['mode'] & 01000) !== 0;
+
+            if (!$trusted_owner || (($path_stat['mode'] & 0022) !== 0 && !$protected_temporary_parent))
+                throw new GuardException('Guard storage ancestors must not be writable by other users.');
+
+            if ($path === $directory && ($path_stat['uid'] !== posix_geteuid() || ($path_stat['mode'] & 0077) !== 0))
+                throw new GuardException('Guard storage must be private and owned by the current user.');
+        }
     }
 
     /**
@@ -307,7 +372,7 @@ final class State
     /**
      * Keep the stored application identity stable across release symlink changes.
      */
-    private function isNormalizedAbsolutePath(string $path): bool
+    private static function isNormalizedAbsolutePath(string $path): bool
     {
         return str_starts_with($path, '/') && $path !== '/' && !str_contains($path, "\0") && !str_contains($path, '//') && preg_match('~(?:^|/)\.{1,2}(?:/|$)~', $path) === 0;
     }

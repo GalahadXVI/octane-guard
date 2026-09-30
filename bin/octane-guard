@@ -3,6 +3,7 @@
 
 declare(strict_types=1);
 
+use GalahadXVI\OctaneGuard\Blocked;
 use GalahadXVI\OctaneGuard\Guard;
 use GalahadXVI\OctaneGuard\GuardException;
 use GalahadXVI\OctaneGuard\State;
@@ -11,42 +12,40 @@ if ($argc === 2 && $argv[1] === '--help') {
     echo <<<'HELP'
 Octane Guard (alpha)
 
-Run through Supervisor:
-  php8.4 vendor/bin/octane-guard --run --app-dir=/absolute/site --state-dir=/absolute/state
+Forge background-process command:
+  /usr/bin/php8.4 /absolute/site/vendor/bin/octane-guard --run --app-dir=/absolute/site
 
-Reset the failure count after fixing the cause and stopping the Forge process:
-  php8.4 vendor/bin/octane-guard --reset --app-dir=/absolute/site --state-dir=/absolute/state
+Use the site's user and working directory. Set Processes=1, Start=1 second,
+Stop=20 seconds, Stop Signal=SIGTERM. Keep Forge's automatic restart enabled.
+Replace the existing Octane command; do not run a second Octane entry.
 
-Requirements:
-  Linux CLI PHP with pcntl, posix, and Swoole. Foreground Swoole only.
-  The guard starts Octane at 127.0.0.1:8000 using the same PHP executable.
-  State must be outside the application, owned by its user, with mode 0700.
-  Keep the same state directory and stable application path across deployments.
+The guard automatically creates private state under the operating-system user's
+home: .octane-guard/<hash-of-app-path>. Keep the same --app-dir across deployments.
+Optional --state-dir=/absolute/state preserves an existing installation's location.
+Never delete or change state to bypass a blocked guard.
 
-Required settings on the existing Octane Supervisor program:
-  numprocs=1
-  autorestart=unexpected
-  exitcodes=0,78,255
-  startsecs=1
-  startretries=3
-  stopwaitsecs=20
-  stopsignal=TERM
-  stopasgroup=true
-  killasgroup=true
+If blocked, the guard stays alive without retrying or launching Octane. The Forge
+process can appear running while Octane is down. See its log for the reason and
+five-minute reminders. Stop, fix the cause, then reset the count if exhausted:
+  php8.4 /absolute/site/vendor/bin/octane-guard --reset --app-dir=/absolute/site
+Use the same --state-dir for reset if you supplied one when running.
 
-Stops take 10 seconds and end with SIGKILL of the guard's own process group.
-Three failed runs stop automatic recovery until --reset. Deploys and reboots
-never reset the count. Normal requested stops do not count as failures.
-
+Requirements: Linux CLI PHP with pcntl, posix, and Swoole. Foreground Swoole only.
+Octane starts at 127.0.0.1:8000 using the same PHP executable.
+Normal stops take 10 seconds and end with SIGKILL of the guard's own process group.
+Three failed runs block recovery. Deploys/reboots/restarts never reset the count.
 The guard does not detect HTTP hangs or clean up pre-existing orphan processes.
-See README.md for setup and limits. Real Octane/Swoole validation is still required
-before production use. Installing this package does not change server settings.
+Real Octane/Swoole validation is still required before production use.
 HELP;
     echo PHP_EOL;
     exit(0);
 }
 
 require_once __DIR__.'/../src/guard-exception.php';
+require_once __DIR__.'/../src/blocked.php';
+
+$operation = $argv[1] ?? null;
+$supervised_run = getenv('SUPERVISOR_ENABLED') === '1' && $operation !== '--reset';
 
 try {
     $arguments = array_slice($argv, 1);
@@ -58,13 +57,13 @@ try {
 
     foreach ($arguments as $argument) {
         if (!preg_match('/^--(app-dir|state-dir)=(.+)$/D', $argument, $matches) || isset($options[$matches[1]]))
-            throw new GuardException('Pass --app-dir and --state-dir once each, using --name=/absolute/path.');
+            throw new GuardException('Pass each path once, using --name=/absolute/path. Only --app-dir and --state-dir are supported.');
 
         $options[$matches[1]] = $matches[2];
     }
 
-    if (count($options) !== 2)
-        throw new GuardException('Both --app-dir=/absolute/site and --state-dir=/absolute/state are required.');
+    if (!isset($options['app-dir']))
+        throw new GuardException('--app-dir=/absolute/site is required.');
 
     if (PHP_SAPI !== 'cli' || PHP_OS_FAMILY !== 'Linux' || !extension_loaded('pcntl') || !extension_loaded('posix'))
         throw new GuardException('Linux CLI PHP with pcntl and posix is required.');
@@ -72,8 +71,13 @@ try {
     require_once __DIR__.'/../src/state.php';
     require_once __DIR__.'/../src/guard.php';
 
+    $options['app-dir'] = rtrim($options['app-dir'], '/');
+
+    if (!isset($options['state-dir']))
+        $options['state-dir'] = State::defaultDirectory($options['app-dir']);
+
     if ($operation === '--run') {
-        if (getenv('SUPERVISOR_ENABLED') !== '1')
+        if (!$supervised_run)
             throw new GuardException('Run mode must be started directly by Supervisor. Use the configured Forge process.');
 
         if (!extension_loaded('swoole'))
@@ -81,6 +85,8 @@ try {
 
         if (!is_file($options['app-dir'].'/artisan'))
             throw new GuardException('The application directory must contain an artisan file.');
+
+        State::provisionDirectory($options['state-dir'], $options['app-dir']);
     }
 
     $boot_id = @file_get_contents('/proc/sys/kernel/random/boot_id');
@@ -99,9 +105,11 @@ try {
 
         $record['launches'] = 0;
         $state->save($record);
-        fwrite(STDOUT, "[octane-guard] Failure count reset. Start the existing Forge Octane process when ready.\n");
+        fwrite(STDOUT, "[octane-guard] Failure count reset. Start the Forge Octane process when ready.\n");
         exit(0);
     }
+
+    fwrite(STDERR, '[octane-guard] State directory: '.json_encode($options['state-dir'], JSON_UNESCAPED_SLASHES).PHP_EOL);
 
     $guard = new Guard($state, [
         PHP_BINARY,
@@ -115,9 +123,15 @@ try {
 
     exit($guard->run());
 } catch (GuardException $exception) {
+    if ($supervised_run)
+        exit(Blocked::wait($exception->getMessage()));
+
     fwrite(STDERR, '[octane-guard] REFUSED: '.$exception->getMessage().PHP_EOL);
     exit(78);
 } catch (Throwable) {
+    if ($supervised_run)
+        exit(Blocked::wait('Unexpected guard failure. Inspect the daemon log and installation before restarting.'));
+
     fwrite(STDERR, "[octane-guard] REFUSED: unexpected guard failure. Check the daemon log before restarting.\n");
     exit(78);
 }

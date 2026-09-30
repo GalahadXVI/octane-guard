@@ -70,7 +70,7 @@ it('prints standalone command help without creating runtime state', function ():
 it('refuses invalid command arguments before creating history', function (string $case): void {
     $arguments = match ($case) {
         'missing-operation' => $this->cli_arguments,
-        'missing-path' => ['--reset', $this->cli_arguments[0]],
+        'missing-path' => ['--reset', $this->cli_arguments[1]],
         'duplicate-path' => ['--reset', ...$this->cli_arguments, $this->cli_arguments[1]],
         'unknown-option' => ['--reset', ...$this->cli_arguments, '--force'],
         'conflicting-operations' => ['--reset', '--run', ...$this->cli_arguments],
@@ -151,5 +151,43 @@ it('refuses to reset while a recorded process group exists without signalling it
         $state->closeInChild();
     } finally {
         $worker->shutdown();
+    }
+});
+
+
+it('parks supervised setup failures without creating history or repeatedly exiting', function (): void {
+    $previous_environment = getenv('SUPERVISOR_ENABLED');
+    putenv('SUPERVISOR_ENABLED=1');
+    $process = new ProcessHarness([dirname(__DIR__, 3).'/bin/octane-guard', '--run', ...$this->cli_arguments, '--invalid'], $this->cli_directory.'/command');
+
+    try {
+        $process->start();
+        $process->waitFor(fn (): bool => str_contains($process->output(), 'BLOCKED'));
+        $output = $process->output();
+        usleep(1_100_000);
+
+        expect($process->isRunning())->toBeTrue()
+            ->and($process->output())->toBe($output)
+            ->and(iterator_count(new FilesystemIterator($this->cli_state)))->toBe(0);
+
+        $process->signal(SIGTERM);
+        expect($process->waitForExit(2.0))->toBe(0);
+    } finally {
+        $process->shutdown();
+        putenv($previous_environment === false ? 'SUPERVISOR_ENABLED' : 'SUPERVISOR_ENABLED='.$previous_environment);
+    }
+});
+
+it('does not park manual reset failures even when the supervisor environment is inherited', function (): void {
+    $previous_environment = getenv('SUPERVISOR_ENABLED');
+    putenv('SUPERVISOR_ENABLED=1');
+
+    try {
+        $result = runOctaneGuardCommand(['--reset', '--invalid'], $this->cli_directory.'/command');
+        expect($result['exit_code'])->toBe(Guard::REFUSED)
+            ->and($result['output'])->toContain('REFUSED')
+            ->and($result['output'])->not->toContain('BLOCKED');
+    } finally {
+        putenv($previous_environment === false ? 'SUPERVISOR_ENABLED' : 'SUPERVISOR_ENABLED='.$previous_environment);
     }
 });

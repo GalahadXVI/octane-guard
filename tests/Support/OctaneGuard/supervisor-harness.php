@@ -32,7 +32,7 @@ final class SupervisorHarness
             ."[supervisord]\nnodaemon=true\nlogfile={$directory}/supervisord.log\npidfile={$directory}/supervisord.pid\nchildlogdir={$directory}\n"
             ."[rpcinterface:supervisor]\nsupervisor.rpcinterface_factory=supervisor.rpcinterface:make_main_rpcinterface\n"
             ."[program:guard]\ncommand={$command}\ndirectory={$directory}/application\n"
-            ."autostart=true\nautorestart=unexpected\nexitcodes=0,78,255\nstartsecs=1\nstartretries=3\n"
+            ."autostart=true\nautorestart=true\nstartsecs=1\nstartretries=3\n"
             ."stopwaitsecs=2\nstopsignal=TERM\nstopasgroup=true\nkillasgroup=true\n"
             ."stdout_logfile={$directory}/guard.log\nredirect_stderr=true\n";
 

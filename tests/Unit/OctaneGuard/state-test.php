@@ -245,3 +245,134 @@ it('does not replace committed history with an interrupted temporary write', fun
 
     $replacement->closeInChild();
 });
+
+
+it('creates private storage components without initializing state', function (): void {
+    $directory = $this->fixture_directory.'/new-parent/site';
+
+    State::provisionDirectory($directory, $this->application_directory);
+
+    expect(is_dir($directory))->toBeTrue()
+        ->and(fileperms(dirname($directory)) & 0777)->toBe(0700)
+        ->and(fileperms($directory) & 0777)->toBe(0700)
+        ->and(scandir($directory))->toBe(['.', '..']);
+});
+
+it('preserves existing reservations while provisioning storage repeatedly', function (): void {
+    $state = new State($this->state_directory, $this->application_directory, '11111111-1111-4111-8111-111111111111');
+    $state->acquire();
+    $record = $state->read();
+    $record['launches'] = 3;
+    $state->save($record);
+    $lock_inode = fileinode($this->state_directory.'/guard.lock');
+
+    State::provisionDirectory($this->state_directory, $this->application_directory);
+    State::provisionDirectory($this->state_directory, $this->application_directory);
+
+    expect($state->read())->toBe($record)
+        ->and(fileinode($this->state_directory.'/guard.lock'))->toBe($lock_inode);
+
+    $state->closeInChild();
+});
+
+it('does not repair unsafe storage permissions during provisioning', function (): void {
+    chmod($this->state_directory, 0755);
+
+    expect(fn () => State::provisionDirectory($this->state_directory, $this->application_directory))->toThrow(RuntimeException::class)
+        ->and(fileperms($this->state_directory) & 0777)->toBe(0755);
+});
+
+it('refuses unsafe ancestor permissions before creating storage', function (): void {
+    $parent = $this->fixture_directory.'/shared';
+    mkdir($parent, 0700);
+    chmod($parent, 0777);
+
+    expect(fn () => State::provisionDirectory($parent.'/state', $this->application_directory))->toThrow(RuntimeException::class)
+        ->and(file_exists($parent.'/state'))->toBeFalse();
+});
+
+it('refuses symlinks and files while provisioning storage', function (string $kind): void {
+    $path = $this->fixture_directory.'/obstacle';
+
+    if ($kind === 'file')
+        file_put_contents($path, 'untouched');
+    else
+        symlink($this->state_directory, $path);
+
+    expect(fn () => State::provisionDirectory($path.'/site', $this->application_directory))->toThrow(RuntimeException::class)
+        ->and(file_exists($this->state_directory.'/site'))->toBeFalse();
+
+    if ($kind === 'file')
+        expect(file_get_contents($path))->toBe('untouched');
+})->with(['file', 'symlink']);
+
+it('rejects non-normalized storage paths before creating directories', function (): void {
+    expect(fn () => State::provisionDirectory($this->fixture_directory.'/new/../state', $this->application_directory))->toThrow(RuntimeException::class)
+        ->and(file_exists($this->fixture_directory.'/new'))->toBeFalse();
+});
+
+it('refuses to provision storage inside the deployed application', function (): void {
+    $directory = $this->application_directory.'/guard-state';
+
+    expect(fn () => State::provisionDirectory($directory, $this->application_directory))->toThrow(RuntimeException::class)
+        ->and(file_exists($directory))->toBeFalse();
+});
+
+it('does not reconstruct missing state when provisioning an existing directory', function (): void {
+    $state = new State($this->state_directory, $this->application_directory, '11111111-1111-4111-8111-111111111111');
+    $state->acquire();
+    $state->closeInChild();
+    unlink($this->state_directory.'/state.json');
+
+    State::provisionDirectory($this->state_directory, $this->application_directory);
+
+    expect(fn () => $state->acquire())->toThrow(RuntimeException::class)
+        ->and(file_exists($this->state_directory.'/state.json'))->toBeFalse();
+});
+
+
+it('allows concurrent provisioning to converge on one private directory', function (): void {
+    $directory = $this->fixture_directory.'/concurrent/site';
+    $code = <<<'PHP'
+require $argv[1];
+GalahadXVI\OctaneGuard\State::provisionDirectory($argv[2], $argv[3]);
+PHP;
+    $processes = [];
+
+    foreach (range(1, 4) as $attempt) {
+        $process = proc_open([PHP_BINARY, '-r', $code, dirname(__DIR__, 3).'/src/state.php', $directory, $this->application_directory], [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
+        expect(is_resource($process))->toBeTrue();
+
+        foreach ($pipes as $pipe)
+            fclose($pipe);
+
+        $processes[] = $process;
+    }
+
+    foreach ($processes as $process)
+        expect(proc_close($process))->toBe(0);
+
+    expect(fileperms($directory) & 0777)->toBe(0700)
+        ->and(scandir($directory))->toBe(['.', '..']);
+});
+
+
+it('derives stable separate default paths from the real user account without writing files', function (): void {
+    $account = posix_getpwuid(posix_geteuid());
+    $root = realpath($account['dir']).'/.octane-guard/';
+    $previous_environment = getenv('HOME');
+    putenv('HOME=/not-the-service-users-home');
+
+    try {
+        $path = State::defaultDirectory('/home/example/current');
+        expect($path)->toBe($root.hash('sha256', '/home/example/current'))
+            ->and(State::defaultDirectory('/home/example/current/'))->toBe($path)
+            ->and(State::defaultDirectory('/home/example/another'))->not->toBe($path);
+    } finally {
+        putenv($previous_environment === false ? 'HOME' : 'HOME='.$previous_environment);
+    }
+});
+
+it('rejects ambiguous application paths before deriving default storage', function (string $path): void {
+    expect(fn (): string => State::defaultDirectory($path))->toThrow(\GalahadXVI\OctaneGuard\GuardException::class);
+})->with(['relative/site', '/home/site/../other', '/home//site', '/']);

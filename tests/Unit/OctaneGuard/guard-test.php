@@ -130,8 +130,12 @@ it('retains the failure budget across completely new guard processes', function 
 
     for ($attempt = 0; $attempt < 3; $attempt++) {
         [$guard, $fixture] = ($this->launch_guard)('clean');
-        expect($guard->waitForExit())->toBe(Guard::REFUSED)
+        $guard->waitFor(fn (): bool => str_contains($guard->output(), 'BLOCKED'));
+        usleep(300_000);
+        expect($guard->isRunning())->toBeTrue()
             ->and(is_file($fixture.'/started.json'))->toBeFalse();
+        $guard->signal(SIGTERM);
+        expect($guard->waitForExit(1.0))->toBe(0);
     }
 
     expect(guardTestRecord($this->guard_state.'/state.json')['launches'])->toBe(Guard::MAX_LAUNCHES);
@@ -142,10 +146,16 @@ it('refuses a competing guard without signalling the existing instance', functio
     $original->waitFor(fn (): bool => is_file($fixture.'/started.json'));
     [$competitor, $next_fixture] = ($this->launch_guard)('clean');
 
-    expect($competitor->waitForExit())->toBe(Guard::REFUSED)
+    $competitor->waitFor(fn (): bool => str_contains($competitor->output(), 'BLOCKED'));
+    expect($competitor->isRunning())->toBeTrue()
         ->and($original->isRunning())->toBeTrue()
         ->and(is_file($next_fixture.'/started.json'))->toBeFalse()
         ->and(guardTestRecord($this->guard_state.'/state.json')['launches'])->toBe(1);
+
+    $competitor->signal(SIGTERM);
+    expect($competitor->waitForExit(1.0))->toBe(0)
+        ->and($original->isRunning())->toBeTrue()
+        ->and(is_file($fixture.'/stopped.json'))->toBeFalse();
 });
 
 it('refuses recovery when only the guard was killed and its child still lives', function (): void {
@@ -155,9 +165,14 @@ it('refuses recovery when only the guard was killed and its child still lives', 
     expect($original->waitForExit())->toBe(128 + SIGKILL);
 
     [$replacement, $next_fixture] = ($this->launch_guard)('clean');
-    expect($replacement->waitForExit())->toBe(Guard::REFUSED)
+    $replacement->waitFor(fn (): bool => str_contains($replacement->output(), 'BLOCKED'));
+    expect($replacement->isRunning())->toBeTrue()
         ->and(Guard::groupIsAbsent($original->pid()))->toBeFalse()
         ->and(is_file($next_fixture.'/started.json'))->toBeFalse();
+
+    $replacement->signal(SIGTERM);
+    expect($replacement->waitForExit(1.0))->toBe(0)
+        ->and(Guard::groupIsAbsent($original->pid()))->toBeFalse();
 });
 
 it('does not refund a failure when a stop arrives during failure cleanup', function (): void {
@@ -187,3 +202,35 @@ it('does not kill an unrelated process when the requested port is occupied', fun
     expect(is_resource($connection))->toBeTrue();
     fclose($connection);
 });
+
+it('stops a blocked guard promptly for each supported stop signal without changing history', function (int $signal): void {
+    file_put_contents($this->guard_state.'/state.json', 'invalid state');
+    [$guard, $fixture] = ($this->launch_guard)('clean');
+    $guard->waitFor(fn (): bool => str_contains($guard->output(), 'BLOCKED'));
+
+    expect($guard->isRunning())->toBeTrue()
+        ->and(is_file($fixture.'/started.json'))->toBeFalse();
+
+    $guard->signal($signal);
+    expect($guard->waitForExit(1.0))->toBe(0)
+        ->and(file_get_contents($this->guard_state.'/state.json'))->toBe('invalid state');
+})->with([SIGTERM, SIGINT, SIGHUP]);
+
+
+it('preserves a stop already pending when entering blocked state', function (string $scenario): void {
+    $runtime = guardTestDirectory($this->guard_root, 'pending-stop');
+    $script = $runtime.'/pending.php';
+    $setup = $scenario === 'masked-signal'
+        ? 'pcntl_sigprocmask(SIG_BLOCK, [SIGTERM]); posix_kill(getmypid(), SIGTERM);'
+        : '';
+    $callback = $scenario === 'received-stop' ? ', static fn (): bool => true' : '';
+    file_put_contents($script, '<?php require '.var_export(dirname(__DIR__, 3).'/src/blocked.php', true).'; '
+        .$setup.' exit(\\GalahadXVI\\OctaneGuard\\Blocked::wait("No launch allowed"'.$callback.'));');
+    $guard = new ProcessHarness([$script], $runtime);
+    $this->guard_processes[] = $guard;
+    $guard->start();
+
+    expect($guard->waitForExit(2.0))->toBe(0)
+        ->and($guard->output())->toContain('Stop requested')
+        ->and($guard->output())->not->toContain('BLOCKED');
+})->with(['masked-signal', 'received-stop']);

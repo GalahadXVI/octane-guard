@@ -39,22 +39,37 @@ afterEach(function (): void {
     rmdir($this->supervisor_directory);
 });
 
-it('bounds automatic child launches under real Supervisor after failures', function (string $mode): void {
+it('parks without automatic restart loops under Forge Supervisor defaults after failures', function (string $mode): void {
     $supervisor = new SupervisorHarness($this->supervisor_directory, $this->supervisor_python, $this->supervisor_source, $mode);
 
     try {
         $supervisor->start();
-        $supervisor->waitFor(fn (): bool => $supervisor->status()['statename'] === 'FATAL', 20.0);
+        $supervisor->waitFor(fn (): bool => is_file($this->supervisor_directory.'/guard.log')
+            && str_contains(file_get_contents($this->supervisor_directory.'/guard.log'), 'BLOCKED'), 20.0);
+        $supervisor->waitFor(fn (): bool => $supervisor->status()['statename'] === 'RUNNING');
+        $blocked_pid = $supervisor->status()['pid'];
 
         expect($supervisor->launches())->toBe(GalahadXVI\OctaneGuard\Guard::MAX_LAUNCHES);
 
-        if ($mode === 'delayed-fail')
-            expect(substr_count(file_get_contents($this->supervisor_directory.'/supervisord.log'), 'guard entered RUNNING state'))->toBe(GalahadXVI\OctaneGuard\Guard::MAX_LAUNCHES);
-
         usleep(2_000_000);
 
-        expect($supervisor->status()['statename'])->toBe('FATAL')
+        expect($supervisor->status()['statename'])->toBe('RUNNING')
+            ->and($supervisor->status()['pid'])->toBe($blocked_pid)
             ->and($supervisor->launches())->toBe(GalahadXVI\OctaneGuard\Guard::MAX_LAUNCHES);
+
+        $supervisor->rpc('stopProcess', ['guard', true]);
+        expect($supervisor->status()['statename'])->toBe('STOPPED');
+        $supervisor->rpc('startProcess', ['guard', true]);
+        $replacement_pid = $supervisor->status()['pid'];
+        expect($replacement_pid)->not->toBe($blocked_pid);
+        usleep(500_000);
+        expect($supervisor->status()['pid'])->toBe($replacement_pid)
+            ->and($supervisor->launches())->toBe(GalahadXVI\OctaneGuard\Guard::MAX_LAUNCHES);
+
+        $supervisor->shutdown();
+        $supervisor->start();
+        $supervisor->waitFor(fn (): bool => $supervisor->status()['statename'] === 'RUNNING');
+        expect($supervisor->launches())->toBe(GalahadXVI\OctaneGuard\Guard::MAX_LAUNCHES);
     } finally {
         $supervisor->shutdown();
         $this->supervisor_shutdown_completed = true;

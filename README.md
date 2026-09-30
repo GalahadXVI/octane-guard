@@ -1,154 +1,99 @@
 # Octane Guard
 
-A small PHP wrapper that cleans up Laravel Octane's worker processes before Supervisor starts it again. It is designed for **Octane with Swoole**, including sites managed by Laravel Forge.
+A small PHP wrapper for Laravel Octane with Swoole. Forge runs the guard; the guard starts Octane and cleans up its worker processes before a replacement can start.
 
-You keep using the existing Forge background process to start, stop, and restart Octane. The guard runs inside that process. It does not change Horizon or the shared Supervisor/systemd service.
+You keep using Forge's background-process controls and logs. Horizon and the shared Supervisor/systemd service are unaffected.
 
-> **Alpha software.** Automated process tests pass on Linux, but testing with real Octane/Swoole and whole-service restarts is still required before production use.
+> **Alpha software.** Tests exercise real processes and Supervisor with fixture workers. Real Octane/Swoole under traffic and whole-service restarts still needs qualification before production use.
 
-## How it works
-
-1. Supervisor starts the guard, which starts one Octane instance.
-2. If Octane exits, the guard stops the processes in its own process group. It never searches for processes by name or port.
-3. The replacement guard starts Octane only after confirming the previous group is gone.
-4. After **three failed runs**, automatic recovery stops until you fix the cause and reset the count.
-
-Those three failures can be months apart. Deployments and reboots do not clear the count. A normal requested stop does not count as a failure.
-
-**Stopping a running Octane instance takes about 10 seconds.** The guard first sends TERM, then KILLs its own group, including itself. Supervisor may therefore log SIGKILL on a normal stop. A deliberate stop in Forge stays stopped.
-
-## Before installing
-
-This version supports:
-
-- Linux with PHP 8.3+, `pcntl`, `posix`, and Swoole.
-- Foreground Swoole at **`127.0.0.1:8000`**. The address and port are currently fixed.
-- One Supervisor process per site, running as the application's user.
-- A persistent state directory outside the application and its release folders.
-
-Do not use daemon mode, `--watch`, a custom Swoole command, or subprocesses that detach from Octane's process group. This is process cleanup, not an HTTP health check; it cannot detect a server that is alive but stuck.
-
-## Install the package
+## Install
 
 From your application's root directory:
 
 ```bash
 composer config repositories.octane-guard vcs https://github.com/GalahadXVI/octane-guard.git
-composer require galahadxvi/octane-guard:0.1.0-alpha.2
+composer require galahadxvi/octane-guard:0.1.0-alpha.3
 ```
 
-The repository is public; no GitHub token is needed for normal downloads. It is not on Packagist, so the repository entry is required. Commit your application's Composer files and deploy normally. Installing the package does not start processes or change server settings.
+Deploy the Composer changes normally. Installation puts the executable at `vendor/bin/octane-guard`; it does not start anything or change your server configuration. The repository is public, so normal downloads need no GitHub token.
+
+The server needs Linux, PHP 8.3+ with `pcntl`, `posix`, and Swoole, and a writable home directory for the site's operating-system user. This version starts foreground Swoole at **`127.0.0.1:8000`**.
 
 ## Laravel Forge: quick setup
 
-Use your **existing Octane background process**. Forge will manage the guard, and the guard will launch Octane. You still use that same entry's Start, Stop, Restart, and log controls.
+Use the site's existing Octane background process. Replace its command with the guard command, which launches Octane itself.
 
-1. **Install and deploy the package** using the Composer commands above. Confirm `vendor/bin/octane-guard` exists on the server.
-2. **In Forge, open the server or site's Processes tab.** Find the existing Octane background process and stop it. Confirm its old workers have exited before switching; do not create another Octane process alongside it.
-3. **SSH into the server as `forge`.** Find the matching Supervisor file with the read-only command below. Check its `directory=` value matches your site, especially if the server hosts several sites.
-4. **Create the state directory and edit that file** using [steps 1 and 2 below](#1-create-the-state-directory). Preserve its existing program name, user, process name, and log settings.
-5. **Apply the change to that one program** using [step 3 below](#3-apply-that-programs-configuration). This starts the updated process. Do not restart the shared Supervisor service.
-6. **Refresh Forge and check the result.** Confirm the process is running, look for `[octane-guard] Started Octane child` in its daemon log, and check that the site responds. A running process alone does not prove the site is healthy.
+1. **Install and deploy the package.** Confirm `vendor/bin/octane-guard` exists on the server.
+2. **Stop the existing Octane background process in Forge.** Confirm its old workers have exited before switching. Keep the site's Octane/Nginx configuration enabled.
+3. **Edit the background process using the fields below.** If creating a replacement entry, remove or disable the old entry's automatic startup so there is only one Octane launcher after reboots.
+4. **Start the process and check its log.** Look for `[octane-guard] Started Octane child`, then check that the site responds.
 
-To locate the existing configuration:
-
-```bash
-sudo grep -HnE '^command=.*(octane:start|octane:swoole|vendor/bin/octane-guard)' /etc/supervisor/conf.d/*.conf
-```
-
-For example, `/etc/supervisor/conf.d/daemon-123456.conf` identifies the file to inspect. Use its actual `[program:...]` name in the commands below.
-
-These are the corresponding Forge fields for the example site:
+Replace `/home/forge/example.com` with your site's stable path:
 
 | Forge field | Value |
 | --- | --- |
+| Name | `Octane Guard` |
+| Command | `/usr/bin/php8.4 /home/forge/example.com/vendor/bin/octane-guard --run --app-dir=/home/forge/example.com` |
 | Working Directory | `/home/forge/example.com` |
-| User | `forge` (or the site's existing isolated user) |
+| User | `forge`, or the site's existing isolated user |
 | Processes | `1` |
 | Start Seconds | `1` |
 | Stop Seconds | `20` |
 | Stop Signal | `SIGTERM` |
 
-**A panel-only command change is not enough.** The required `autorestart`, `exitcodes`, and other Supervisor settings are listed below. Apply the complete configuration before starting the guarded process. Later panel edits may overwrite those settings, so check them again afterward.
+Use your actual PHP executable. The guard uses it to start Octane too. Keep Forge's automatic restart enabled. **No manual Supervisor file edits, separate installer command, or shared service changes are needed for this setup.**
 
-For an isolated site, use its existing operating-system user and home directory throughout instead of `forge` and `/home/forge`. [Forge background process documentation](https://laravel.com/forge/docs/resources/background-processes)
+The guard creates its private state directory automatically under the operating-system user's home: `~/.octane-guard/<hash-of-app-path>`. It stores the lock and failure count there, outside deployments. Keep the same `--app-dir` path, including when deployments use release symlinks.
 
-## Set up the existing Octane process
+**Forge showing “running” means the guard is alive, not that Octane is healthy.** If the guard blocks recovery, the explanation appears in that process's log. [Forge background processes and logs](https://laravel.com/forge/docs/resources/background-processes)
 
-Plan a brief interruption while switching the process. The examples below use `/home/forge/example.com`; replace it with your stable site path, even when deployments use release symlinks.
+### Upgrading an older guard installation
 
-### 1. Create the state directory
+Keep your existing `--state-dir=/absolute/state` argument on both run and reset commands. Omitting it would select a different directory and lose continuity with the existing failure history. Existing directories and files are validated, never silently repaired or reset.
 
-Run this **as `forge`**, not root:
+The previous `autorestart=unexpected` configuration still works; new installations can use Forge's `autorestart=true` configuration. Restart the background process after deploying a guard update: `octane:reload` alone does not replace the running guard.
 
-```bash
-install -d -m 0700 /home/forge/.local/state/octane-guard/example
-```
+## What happens when Octane fails?
 
-Use a different directory for each site. Keep it across deployments and reboots. Let the guard create its files; do not copy another site's state or delete it to bypass a refusal.
+1. The guard signals only its own process group to stop. It never searches for processes by name or kills whatever holds port 8000.
+2. After a 10-second grace period, it kills its group, including itself. Supervisor starts a replacement guard.
+3. The replacement checks that the previous group has gone before launching Octane.
+4. After **three failed runs**, the guard stays alive but idle. It logs `BLOCKED` and makes no more launch attempts until an operator fixes the cause and resets the count.
 
-### 2. Update only the Octane entry
+The failure count survives process restarts, deployments, and reboots. Failures can be months apart. A normal requested stop does not count as a failure.
 
-Stop the existing Octane process in Forge and confirm its old workers are gone. Do not add a second Octane entry alongside it.
+**Normal stops also take about 10 seconds** and may show SIGKILL in Supervisor's log. A blocked guard has no new workers to clean up and stops promptly. A deliberate Stop in Forge stays stopped.
 
-Edit that program's file under `/etc/supervisor/conf.d/`. Keep its existing program name, user, process name, working directory, and logging settings. Replace the command and set these values:
+## If the log says BLOCKED
 
-```ini
-command=/usr/bin/php8.4 /home/forge/example.com/vendor/bin/octane-guard --run --app-dir=/home/forge/example.com --state-dir=/home/forge/.local/state/octane-guard/example
-numprocs=1
-autostart=true
-autorestart=unexpected
-exitcodes=0,78,255
-startsecs=1
-startretries=3
-stopwaitsecs=20
-stopsignal=TERM
-stopasgroup=true
-killasgroup=true
-```
+The guard logs the reason immediately and repeats it every five minutes. While blocked, it sleeps; it does not keep attempting recovery, launch workers, or kill processes. Missing prerequisites, invalid state, a competing guard, or a surviving previous process group also block startup.
 
-Check that `/usr/bin/php8.4` is the correct executable on your server. The guard uses that same PHP executable to start Octane.
+Read the reason in the Forge background-process log, then:
 
-**These settings are required.** In particular, `autorestart=true` would keep restarting a guard that has refused to run. The 20-second stop allowance gives the guard time to finish its 10-second cleanup. Changing only Forge's command field is not enough.
-
-### 3. Apply that program's configuration
-
-For an entry named `[program:daemon-123456]`, use:
+1. Stop that background process in Forge.
+2. Fix the reported cause. Do not delete the state directory or change its path to bypass a refusal.
+3. If the failure count is exhausted, run the following as the same operating-system user that runs the guard:
 
 ```bash
-sudo supervisorctl reread
-sudo supervisorctl update daemon-123456
-sudo supervisorctl status 'daemon-123456:*'
+php8.4 /home/forge/example.com/vendor/bin/octane-guard --reset --app-dir=/home/forge/example.com
 ```
 
-Replace the example ID with your Octane program's name. `update` applies the change and starts the updated program because `autostart=true`; you do not need to restart the shared Supervisor service. [Supervisor command reference](https://supervisord.org/running.html#supervisorctl-actions)
+4. Start the background process again and check its log and the site.
 
-You can then use the existing Forge process controls. Forge may rewrite manually edited settings, so check them after editing the entry in the panel.
+If you supplied `--state-dir` in Forge, include the same argument when resetting. Reset refuses while the guard holds the lock or its recorded process group still exists. Simply restarting a blocked process does not clear its failure count.
 
-## If recovery stops
+## Limits
 
-Read the existing Forge daemon log. Messages starting with `[octane-guard]` explain whether the failure count is exhausted, another guard holds the lock, or the state/setup is invalid.
-
-After fixing the cause, stop the Forge entry and run this as `forge`:
-
-```bash
-php8.4 /home/forge/example.com/vendor/bin/octane-guard --reset --app-dir=/home/forge/example.com --state-dir=/home/forge/.local/state/octane-guard/example
-```
-
-Then start the same Forge entry. Reset refuses while a guard or its recorded process group is still alive. Missing or corrupt state also causes a refusal; deleting the state is not a recovery step.
-
-Exit `78` means a safety refusal. Supervisor may make a few startup attempts before showing `FATAL`, but the guard will not launch more Octane instances after its limit is reached.
-
-## Updates and limits
-
-- Update to a specific package version, deploy it, then restart the Forge background process. `octane:reload` alone does not replace the running guard.
-- The guard cannot adopt orphan processes left before installation. If the guard alone is killed and its workers survive, the replacement refuses to start rather than guessing which old processes to kill.
-- Forced termination can interrupt requests; it does not undo completed database writes or external actions.
-- To roll back, stop the guarded entry, confirm its group is gone, then restore the original Octane command and Supervisor settings.
+- This is process cleanup, not an HTTP health check. It cannot detect a server that is alive but stuck.
+- It supports one foreground Octane/Swoole instance per site, without daemon mode, `--watch`, custom Swoole commands, or children that detach from its process group.
+- It cannot adopt workers left behind before installation. If only the guard dies and its workers survive, the replacement blocks instead of guessing which processes to kill.
+- Forced termination can interrupt requests. It does not undo completed database writes or external actions.
+- The blocked state handles failures the guard can detect after PHP starts. It cannot handle a missing PHP executable or an unreadable/broken executable that prevents the guard from running at all.
+- To roll back, stop the guarded entry, confirm its workers have exited, and restore the original Octane command.
 
 ## Development
 
-The command does not boot Laravel or load the consuming application's Composer autoloader. Its state files are tied to the site path and Linux boot ID.
+The executable does not boot Laravel or load the consuming application's Composer autoloader. State is tied to the stable application path and Linux boot ID.
 
 Use PHP 8.4 for the development dependency lock:
 
@@ -158,7 +103,7 @@ composer validate --strict
 composer test
 ```
 
-Supervisor integration tests need Supervisor 4.2.5 and Python. Set `OCTANE_GUARD_SUPERVISOR_SOURCE` to the directory containing its `supervisor` package and `OCTANE_GUARD_SUPERVISOR_PYTHON` to the interpreter. Without those settings, those tests skip. CI installs both and runs the suite on Ubuntu.
+Supervisor integration tests need Supervisor 4.2.5 and Python. Set `OCTANE_GUARD_SUPERVISOR_SOURCE` to the directory containing its `supervisor` package and `OCTANE_GUARD_SUPERVISOR_PYTHON` to the interpreter. Without those settings, these tests skip. CI installs both and runs the suite on Ubuntu.
 
 Tests use temporary directories, isolated process groups, and local sockets. They do not boot an application or control the server's existing Supervisor. Before production use, also test your actual PHP/Octane/Swoole versions under requests and repeated whole-Supervisor restarts, checking that old worker groups disappear before replacements start.
 

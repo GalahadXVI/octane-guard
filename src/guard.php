@@ -7,6 +7,7 @@ namespace GalahadXVI\OctaneGuard;
 use Throwable;
 
 require_once __DIR__.'/guard-exception.php';
+require_once __DIR__.'/blocked.php';
 
 /**
  * Own one foreground Octane generation in Supervisor's process group.
@@ -41,9 +42,7 @@ final class Guard
     public function run(): int
     {
         if ($this->owner_pid !== posix_getpgrp()) {
-            $this->log('REFUSED: guard must be the process-group leader, started directly by Supervisor.');
-
-            return self::REFUSED;
+            return $this->block('Guard must be the process-group leader, started directly by Supervisor.');
         }
 
         pcntl_async_signals(true);
@@ -57,18 +56,14 @@ final class Guard
             $state = $this->state->read();
 
             if (! $this->waitForPreviousGroup($state['pgid'])) {
-                $this->log('REFUSED: previous process group still exists or cannot be inspected; no processes were killed.');
-
-                return self::REFUSED;
+                return $this->block('Previous process group still exists or cannot be inspected; no processes were killed.');
             }
 
             if ($this->stop_requested)
                 return 0;
 
             if ($state['launches'] >= self::MAX_LAUNCHES) {
-                $this->log('CIRCUIT OPEN: three unsuccessful lifecycles; fix the cause and explicitly reset while stopped.');
-
-                return self::REFUSED;
+                return $this->block('Three unsuccessful lifecycles; automatic recovery is exhausted.');
             }
 
             if (! chdir($this->application_path))
@@ -113,16 +108,28 @@ final class Guard
 
             $this->shutdownGeneration($state, true);
         } catch (GuardException $exception) {
-            $this->log('REFUSED: '.$exception->getMessage());
+            if ($this->launched)
+                $this->log('REFUSED: '.$exception->getMessage());
+
             $this->emergencyCleanup();
 
-            return self::REFUSED;
+            return $this->block($exception->getMessage());
         } catch (Throwable) {
-            $this->log('REFUSED: unexpected guard failure. Check the daemon log before restarting.');
+            if ($this->launched)
+                $this->log('REFUSED: unexpected guard failure; cleaning up this generation.');
+
             $this->emergencyCleanup();
 
-            return self::REFUSED;
+            return $this->block('Unexpected guard failure. Check the daemon log before restarting.');
         }
+    }
+
+    /**
+     * Keep Supervisor's restart policy from repeating a refused launch.
+     */
+    private function block(string $reason): int
+    {
+        return Blocked::wait($reason, fn (): bool => $this->stop_requested);
     }
 
     /**
