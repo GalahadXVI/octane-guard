@@ -161,3 +161,7 @@ composer test
 Supervisor integration tests need Supervisor 4.2.5 and Python. Set `OCTANE_GUARD_SUPERVISOR_SOURCE` to the directory containing its `supervisor` package and `OCTANE_GUARD_SUPERVISOR_PYTHON` to the interpreter. Without those settings, those tests skip. CI installs both and runs the suite on Ubuntu.
 
 Tests use temporary directories, isolated process groups, and local sockets. They do not boot an application or control the server's existing Supervisor. Before production use, also test your actual PHP/Octane/Swoole versions under requests and repeated whole-Supervisor restarts, checking that old worker groups disappear before replacements start.
+
+## License
+
+All rights reserved. See [LICENSE](LICENSE) for permitted use.
