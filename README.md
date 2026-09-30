@@ -1,10 +1,13 @@
 # Octane Guard
 
+> [!WARNING]
+> **UNTESTED — DO NOT USE IN PRODUCTION.**
+>
+> This package has not been tested with real Laravel Octane/Swoole under production conditions. Automated tests use fixture workers and do not prove that it will safely recover your server or prevent an outage. Use it only in an isolated test environment until real-world validation is complete.
+
 A small PHP wrapper for Laravel Octane with Swoole. Forge runs the guard; the guard starts Octane and cleans up its worker processes before a replacement can start.
 
 You keep using Forge's background-process controls and logs. Horizon and the shared Supervisor/systemd service are unaffected.
-
-> **Alpha software.** Tests exercise real processes and Supervisor with fixture workers. Real Octane/Swoole under traffic and whole-service restarts still needs qualification before production use.
 
 ## Why this exists
 
