@@ -1,6 +1,6 @@
 {
     "name": "galahadxvi/octane-guard",
-    "description": "Bounded foreground Octane/Swoole lifecycle guard for Supervisor. Private pre-release.",
+    "description": "Bounded Octane/Swoole process cleanup and recovery for Supervisor.",
     "type": "library",
     "license": "proprietary",
     "require": {

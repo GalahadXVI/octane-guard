@@ -4,8 +4,9 @@ declare(strict_types=1);
 
 namespace GalahadXVI\OctaneGuard;
 
-use RuntimeException;
 use Throwable;
+
+require_once __DIR__.'/guard-exception.php';
 
 /**
  * Own one foreground Octane generation in Supervisor's process group.
@@ -71,11 +72,11 @@ final class Guard
             }
 
             if (! chdir($this->application_path))
-                throw new RuntimeException('Cannot enter application directory.');
+                throw new GuardException('Cannot enter application directory.');
 
             # A stop cannot land between reserving ownership and recording the child.
             if (! pcntl_sigprocmask(SIG_BLOCK, [SIGTERM, SIGINT, SIGHUP]))
-                throw new RuntimeException('Cannot block shutdown signals.');
+                throw new GuardException('Cannot block shutdown signals.');
 
             if ($this->stop_requested) {
                 pcntl_sigprocmask(SIG_UNBLOCK, [SIGTERM, SIGINT, SIGHUP]);
@@ -89,7 +90,7 @@ final class Guard
             $child_pid = pcntl_fork();
 
             if ($child_pid === -1)
-                throw new RuntimeException('Cannot fork Octane.');
+                throw new GuardException('Cannot fork Octane.');
 
             if ($child_pid === 0)
                 $this->executeChild();
@@ -105,14 +106,19 @@ final class Guard
                     $this->shutdownGeneration($state, false);
 
                 if ($result === -1 && pcntl_get_last_error() !== PCNTL_EINTR)
-                    throw new RuntimeException('Cannot observe Octane child.');
+                    throw new GuardException('Cannot observe Octane child.');
 
                 usleep(100_000);
             }
 
             $this->shutdownGeneration($state, true);
+        } catch (GuardException $exception) {
+            $this->log('REFUSED: '.$exception->getMessage());
+            $this->emergencyCleanup();
+
+            return self::REFUSED;
         } catch (Throwable) {
-            $this->log('REFUSED: guard configuration, state, or process operation failed. Inspect the guard setup before restarting.');
+            $this->log('REFUSED: unexpected guard failure. Check the daemon log before restarting.');
             $this->emergencyCleanup();
 
             return self::REFUSED;
@@ -224,10 +230,10 @@ final class Guard
     private function signalOwnedGroup(int $signal): void
     {
         if (getmypid() !== $this->owner_pid || posix_getpgrp() !== $this->owner_pid)
-            throw new RuntimeException('Process-group ownership changed.');
+            throw new GuardException('Process-group ownership changed.');
 
         if (! posix_kill(-$this->owner_pid, $signal))
-            throw new RuntimeException('Cannot signal owned process group.');
+            throw new GuardException('Cannot signal owned process group.');
     }
 
     /**

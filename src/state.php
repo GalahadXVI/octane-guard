@@ -5,7 +5,8 @@ declare(strict_types=1);
 namespace GalahadXVI\OctaneGuard;
 
 use JsonException;
-use RuntimeException;
+
+require_once __DIR__.'/guard-exception.php';
 
 final class State
 {
@@ -29,22 +30,22 @@ final class State
         $application_path = rtrim($application_path, '/');
 
         if (!$this->isNormalizedAbsolutePath($directory) || !$this->isNormalizedAbsolutePath($application_path))
-            throw new RuntimeException('Guard paths must be normalized absolute paths.');
+            throw new GuardException('Guard paths must be normalized absolute paths.');
 
         if (!$this->isBootId($boot_id))
-            throw new RuntimeException('Guard boot identity must be a UUID.');
+            throw new GuardException('Guard boot identity must be a UUID.');
 
         $directory_stat = @lstat($directory);
         $resolved_application = realpath($application_path);
 
         if ($directory_stat === false || realpath($directory) !== $directory || !is_dir($directory) || !is_dir($application_path) || $resolved_application === false)
-            throw new RuntimeException('Guard storage and application directories must exist.');
+            throw new GuardException('Guard storage and application directories must exist.');
 
         if ($directory_stat['uid'] !== posix_geteuid() || ($directory_stat['mode'] & 0077) !== 0)
-            throw new RuntimeException('Guard storage must be private and owned by the current user.');
+            throw new GuardException('Guard storage must be private and owned by the current user.');
 
         if ($directory === $resolved_application || str_starts_with($directory, $resolved_application.'/') || $directory === $application_path || str_starts_with($directory, $application_path.'/'))
-            throw new RuntimeException('Guard storage must be outside the deployed application.');
+            throw new GuardException('Guard storage must be outside the deployed application.');
 
         $this->directory = $directory;
         $this->application_path = $application_path;
@@ -57,7 +58,7 @@ final class State
     public function acquire(): void
     {
         if (is_resource($this->lock))
-            throw new RuntimeException('Guard storage is already locked by this instance.');
+            throw new GuardException('Guard storage is already locked by this instance.');
 
         $lock_path = $this->directory.'/guard.lock';
         $lock = $this->pathExists($lock_path) ? false : @fopen($lock_path, 'x+b');
@@ -69,33 +70,33 @@ final class State
         }
 
         if (!is_resource($lock))
-            throw new RuntimeException('Guard lock cannot be opened.');
+            throw new GuardException('Guard lock cannot be opened.');
 
         if ($new_lock && !@chmod($lock_path, 0600)) {
             fclose($lock);
-            throw new RuntimeException('Guard lock permissions cannot be set.');
+            throw new GuardException('Guard lock permissions cannot be set.');
         }
 
         try {
             $this->assertPrivateFile($lock_path, $lock);
 
             if (!flock($lock, LOCK_EX | LOCK_NB))
-                throw new RuntimeException('Another guard owns this application lock.');
+                throw new GuardException('Another guard owns this application lock.');
 
             $this->lock = $lock;
             $state_exists = $this->pathExists($this->directory.'/state.json');
 
             if ($new_lock === $state_exists)
-                throw new RuntimeException('Guard lock and durable state history are inconsistent.');
+                throw new GuardException('Guard lock and durable state history are inconsistent.');
 
             if ($new_lock) {
                 $this->save(['version' => 1, 'application_path' => $this->application_path, 'boot_id' => $this->boot_id, 'launches' => 0, 'pgid' => null]);
 
                 if (fwrite($lock, self::LOCK_MARKER) !== strlen(self::LOCK_MARKER) || !fflush($lock) || !fsync($lock))
-                    throw new RuntimeException('Guard lock history cannot be committed.');
+                    throw new GuardException('Guard lock history cannot be committed.');
             } else {
                 if (stream_get_contents($lock, 128) !== self::LOCK_MARKER)
-                    throw new RuntimeException('Guard lock initialization is incomplete.');
+                    throw new GuardException('Guard lock initialization is incomplete.');
 
                 $state = $this->read();
 
@@ -125,23 +126,23 @@ final class State
         $stream = @fopen($state_path, 'rb');
 
         if (!is_resource($stream))
-            throw new RuntimeException('Guard state cannot be read.');
+            throw new GuardException('Guard state cannot be read.');
 
         try {
             $this->assertPrivateFile($state_path, $stream);
             $contents = stream_get_contents($stream, 4097);
 
             if ($contents === false || strlen($contents) > 4096)
-                throw new RuntimeException('Guard state is invalid.');
+                throw new GuardException('Guard state is invalid.');
 
             try {
                 $state = json_decode($contents, true, 8, JSON_THROW_ON_ERROR);
             } catch (JsonException) {
-                throw new RuntimeException('Guard state is invalid.');
+                throw new GuardException('Guard state is invalid.');
             }
 
             if (!is_array($state))
-                throw new RuntimeException('Guard state is invalid.');
+                throw new GuardException('Guard state is invalid.');
 
             $this->validate($state);
 
@@ -162,17 +163,17 @@ final class State
         $this->validate($state);
 
         if ($state['boot_id'] !== $this->boot_id)
-            throw new RuntimeException('Guard cannot write state for another boot.');
+            throw new GuardException('Guard cannot write state for another boot.');
 
         $temporary_path = $this->directory.'/state-'.bin2hex(random_bytes(16)).'.tmp';
         $stream = @fopen($temporary_path, 'x+b');
 
         if (!is_resource($stream))
-            throw new RuntimeException('Guard state cannot be written.');
+            throw new GuardException('Guard state cannot be written.');
 
         try {
             if (!@chmod($temporary_path, 0600))
-                throw new RuntimeException('Guard state permissions cannot be set.');
+                throw new GuardException('Guard state permissions cannot be set.');
 
             $contents = json_encode($state, JSON_THROW_ON_ERROR)."\n";
             $length = strlen($contents);
@@ -182,22 +183,22 @@ final class State
                 $result = fwrite($stream, substr($contents, $written));
 
                 if ($result === false || $result === 0)
-                    throw new RuntimeException('Guard state cannot be written.');
+                    throw new GuardException('Guard state cannot be written.');
 
                 $written += $result;
             }
 
             if (!fflush($stream) || !fsync($stream) || !@rename($temporary_path, $this->directory.'/state.json'))
-                throw new RuntimeException('Guard state cannot be committed.');
+                throw new GuardException('Guard state cannot be committed.');
 
             $directory_stream = @fopen($this->directory, 'r');
 
             if (!is_resource($directory_stream))
-                throw new RuntimeException('Guard state directory cannot be synchronized.');
+                throw new GuardException('Guard state directory cannot be synchronized.');
 
             try {
                 if (!@fsync($directory_stream))
-                    throw new RuntimeException('Guard state directory cannot be synchronized.');
+                    throw new GuardException('Guard state directory cannot be synchronized.');
             } finally {
                 fclose($directory_stream);
             }
@@ -239,7 +240,7 @@ final class State
         $stream_stat = fstat($stream);
 
         if ($stream_stat === false || $path_stat['ino'] !== $stream_stat['ino'] || $path_stat['dev'] !== $stream_stat['dev'] || $stream_stat['uid'] !== posix_geteuid() || ($stream_stat['mode'] & 0077) !== 0 || $stream_stat['nlink'] !== 1)
-            throw new RuntimeException('Guard storage files must be private regular files owned by the current user.');
+            throw new GuardException('Guard storage files must be private regular files owned by the current user.');
     }
 
     /**
@@ -252,12 +253,12 @@ final class State
         clearstatcache(true, $path);
 
         if (!$this->pathExists($path))
-            throw new RuntimeException('Guard storage file is missing.');
+            throw new GuardException('Guard storage file is missing.');
 
         $path_stat = @lstat($path);
 
         if ($path_stat === false || ($path_stat['mode'] & 0170000) !== 0100000 || $path_stat['uid'] !== posix_geteuid() || ($path_stat['mode'] & 0077) !== 0 || $path_stat['nlink'] !== 1)
-            throw new RuntimeException('Guard storage files must be private regular files owned by the current user.');
+            throw new GuardException('Guard storage files must be private regular files owned by the current user.');
 
         return $path_stat;
     }
@@ -268,7 +269,7 @@ final class State
     private function assertLocked(): void
     {
         if (!is_resource($this->lock))
-            throw new RuntimeException('Guard state access requires the application lock.');
+            throw new GuardException('Guard state access requires the application lock.');
     }
 
     /**
@@ -282,7 +283,7 @@ final class State
         sort($keys);
 
         if ($keys !== ['application_path', 'boot_id', 'launches', 'pgid', 'version'] || $state['version'] !== 1 || $state['application_path'] !== $this->application_path || !is_string($state['boot_id']) || !$this->isBootId($state['boot_id']) || !is_int($state['launches']) || $state['launches'] < 0 || !($state['pgid'] === null || (is_int($state['pgid']) && $state['pgid'] > 1)))
-            throw new RuntimeException('Guard state does not match the application schema.');
+            throw new GuardException('Guard state does not match the application schema.');
     }
 
     /**

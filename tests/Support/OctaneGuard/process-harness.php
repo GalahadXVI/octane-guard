@@ -32,6 +32,12 @@ final class ProcessHarness
         if ($this->process !== null)
             throw new RuntimeException('The test process has already started.');
 
+        $this->exit_code = null;
+        $this->group_verified = false;
+
+        if (is_file($this->directory.'/session.pid'))
+            unlink($this->directory.'/session.pid');
+
         $launcher = 'if (posix_setsid() < 0) { exit(120); } '
             .'file_put_contents($argv[1], (string) getmypid()); '
             .'pcntl_exec(PHP_BINARY, array_slice($argv, 2)); exit(121);';

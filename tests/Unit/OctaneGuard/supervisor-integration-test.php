@@ -84,3 +84,28 @@ it('leaves a deliberately stopped guard stopped without consuming its failure al
         $this->supervisor_shutdown_completed = true;
     }
 });
+
+it('cleans stubborn workers across repeated whole Supervisor restarts using the same durable state', function (): void {
+    $supervisor = new SupervisorHarness($this->supervisor_directory, $this->supervisor_python, $this->supervisor_source, 'stubborn');
+
+    try {
+        for ($generation = 1; $generation <= 3; $generation++) {
+            $supervisor->start();
+            $supervisor->waitFor(fn (): bool => $supervisor->status()['statename'] === 'RUNNING');
+            $running_state = json_decode(file_get_contents($this->supervisor_directory.'/state/state.json'), true, 64, JSON_THROW_ON_ERROR);
+
+            expect($supervisor->launches())->toBe($generation)
+                ->and($running_state['launches'])->toBe(1);
+
+            $supervisor->shutdown();
+            $supervisor->waitFor(fn (): bool => GalahadXVI\OctaneGuard\Guard::groupIsAbsent($running_state['pgid']));
+            $stopped_state = json_decode(file_get_contents($this->supervisor_directory.'/state/state.json'), true, 64, JSON_THROW_ON_ERROR);
+
+            expect($stopped_state['launches'])->toBe(0)
+                ->and($stopped_state['pgid'])->toBe($running_state['pgid']);
+        }
+    } finally {
+        $supervisor->shutdown();
+        $this->supervisor_shutdown_completed = true;
+    }
+});
