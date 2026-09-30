@@ -6,6 +6,26 @@ You keep using Forge's background-process controls and logs. Horizon and the sha
 
 > **Alpha software.** Tests exercise real processes and Supervisor with fixture workers. Real Octane/Swoole under traffic and whole-service restarts still needs qualification before production use.
 
+## Why this exists
+
+This package was built after outages on two separate Forge-managed sites. Logs showed Supervisor restarting around unattended system updates, followed by repeated Octane startup failures and Supervisor eventually entering `FATAL` state.
+
+The suspected failure sequence was:
+
+1. Supervisor restarted and stopped the Octane launcher.
+2. Some Swoole processes survived and kept Octane's listening port occupied.
+3. Replacement Octane instances could not start, so Supervisor exhausted its startup attempts and gave up.
+
+The restart and failed startup attempts were observed. Surviving Swoole processes explain the symptoms, but the exact cause has not been conclusively reproduced. This is not confirmation of a particular Forge, Supervisor, or Swoole bug.
+
+### How the guard addresses it
+
+Supervisor manages the guard instead of starting Octane directly. When a stop is requested or Octane exits, the guard tells its own process group to shut down, waits ten seconds, then forcibly terminates that group, including itself. The replacement guard checks that the previous group has disappeared before starting Octane.
+
+**That cleanup before replacement is the part intended to prevent the outage.** It depends on Octane and its workers remaining in the guard's process group. If the guard cannot establish that the previous group is gone, it logs the reason and blocks startup instead of guessing which processes to kill.
+
+The three-failure limit prevents repeated recovery attempts from continuing indefinitely; it does not fix the underlying failure. This behaviour has been tested with Supervisor and deliberately stubborn fixture workers. Validation with real Octane/Swoole under traffic is still required.
+
 ## Install
 
 From your application's root directory:
