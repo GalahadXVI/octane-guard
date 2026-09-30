@@ -39,6 +39,40 @@ composer require galahadxvi/octane-guard:0.1.0-alpha.2
 
 The repository is public; no GitHub token is needed for normal downloads. It is not on Packagist, so the repository entry is required. Commit your application's Composer files and deploy normally. Installing the package does not start processes or change server settings.
 
+## Laravel Forge: quick setup
+
+Use your **existing Octane background process**. Forge will manage the guard, and the guard will launch Octane. You still use that same entry's Start, Stop, Restart, and log controls.
+
+1. **Install and deploy the package** using the Composer commands above. Confirm `vendor/bin/octane-guard` exists on the server.
+2. **In Forge, open the server or site's Processes tab.** Find the existing Octane background process and stop it. Confirm its old workers have exited before switching; do not create another Octane process alongside it.
+3. **SSH into the server as `forge`.** Find the matching Supervisor file with the read-only command below. Check its `directory=` value matches your site, especially if the server hosts several sites.
+4. **Create the state directory and edit that file** using [steps 1 and 2 below](#1-create-the-state-directory). Preserve its existing program name, user, process name, and log settings.
+5. **Apply the change to that one program** using [step 3 below](#3-apply-that-programs-configuration). This starts the updated process. Do not restart the shared Supervisor service.
+6. **Refresh Forge and check the result.** Confirm the process is running, look for `[octane-guard] Started Octane child` in its daemon log, and check that the site responds. A running process alone does not prove the site is healthy.
+
+To locate the existing configuration:
+
+```bash
+sudo grep -HnE '^command=.*(octane:start|octane:swoole|vendor/bin/octane-guard)' /etc/supervisor/conf.d/*.conf
+```
+
+For example, `/etc/supervisor/conf.d/daemon-123456.conf` identifies the file to inspect. Use its actual `[program:...]` name in the commands below.
+
+These are the corresponding Forge fields for the example site:
+
+| Forge field | Value |
+| --- | --- |
+| Working Directory | `/home/forge/example.com` |
+| User | `forge` (or the site's existing isolated user) |
+| Processes | `1` |
+| Start Seconds | `1` |
+| Stop Seconds | `20` |
+| Stop Signal | `SIGTERM` |
+
+**A panel-only command change is not enough.** The required `autorestart`, `exitcodes`, and other Supervisor settings are listed below. Apply the complete configuration before starting the guarded process. Later panel edits may overwrite those settings, so check them again afterward.
+
+For an isolated site, use its existing operating-system user and home directory throughout instead of `forge` and `/home/forge`. [Forge background process documentation](https://laravel.com/forge/docs/resources/background-processes)
+
 ## Set up the existing Octane process
 
 Plan a brief interruption while switching the process. The examples below use `/home/forge/example.com`; replace it with your stable site path, even when deployments use release symlinks.
