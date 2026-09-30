@@ -39,7 +39,7 @@ final class ProcessHarness
             unlink($this->directory.'/session.pid');
 
         $launcher = 'if (posix_setsid() < 0) { exit(120); } '
-            .'file_put_contents($argv[1], (string) getmypid()); '
+            .'if (file_put_contents($argv[1].".tmp", (string) getmypid()) === false || !rename($argv[1].".tmp", $argv[1])) { exit(122); } '
             .'pcntl_exec(PHP_BINARY, array_slice($argv, 2)); exit(121);';
 
         $this->process = proc_open(
